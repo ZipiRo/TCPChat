@@ -22,7 +22,7 @@ void ProcessPackets(Client &client)
 
             lock.unlock();
 
-            DebugLog("Network says: " + buffer);
+            DebugLog("Server says: " + buffer);
 
             lock.lock();
         }
@@ -38,12 +38,10 @@ int main()
     std::thread(ProcessPackets, std::ref(client)).detach();
 
     while(client.connected) {
-        client.SendData("PUSY");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     client.Close();
-    Logger::CloseLogger();
 
     return 0;
 }

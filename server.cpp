@@ -38,12 +38,10 @@ int main()
     std::thread(ProcessPackets, std::ref(server)).detach();
 
     while (server.running) {
-        server.BroadCast("PULA");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     server.Close();
-    Logger::CloseLogger();
     
     return 0;
 }
