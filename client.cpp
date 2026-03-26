@@ -6,7 +6,19 @@
 
 void ProcessPacket(const Packet &packet)
 {
+    switch (packet.type)
+    {
+    case PACKET_WELLCOME:
+    {
+        PacketReader reader(packet.data);
 
+        std::cout << "CONNECTION SUCCESFULL!";
+
+        break;
+    }
+    default:
+        break;
+    }    
 }
 
 int main()
@@ -16,6 +28,16 @@ int main()
 
     client.SetPacketHandler(ProcessPacket);
     client.Connect("127.0.0.1", 100);
+
+    if(client.connected)
+    {
+        Packet packet;
+        packet.type = PACKET_JOIN;
+        packet.Write(PROTOCOL_VERSION);
+        packet.Write(MAGIC_HANDSHAKE);
+
+        client.SendPacket(packet);
+    }
 
     while(client.connected) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

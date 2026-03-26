@@ -37,7 +37,7 @@ private:
     std::thread process_thread;
     std::vector<std::thread> client_therads;
 
-    std::function<void(const Packet&)> packet_handler;
+    std::function<void(const ClientPacket&)> packet_handler;
     
     friend void ServerThread(Server &);
     friend void ProcessThread(Server &);
@@ -62,6 +62,11 @@ public:
     std::condition_variable send_cv;
 
     Server(int max_clients, int max_data_size)
+    {
+        Init(max_clients, max_data_size);
+    }
+
+    void Init(int max_clients, int max_data_size)
     {
         running = false;
         clients_connected = 0;
@@ -160,7 +165,7 @@ public:
         DebugLog("Client " + std::to_string(client_index) + " disconnected");
     }
 
-    void SetPacketHandler(std::function<void (const Packet&)> handler)
+    void SetPacketHandler(std::function<void (const ClientPacket&)> handler)
     {
         packet_handler = handler;
     }
@@ -325,7 +330,7 @@ void ProcessThread(Server &server)
             lock.unlock();
 
             if(server.packet_handler)
-                server.packet_handler(client_packet.packet);
+                server.packet_handler(client_packet);
 
             lock.lock();
         }

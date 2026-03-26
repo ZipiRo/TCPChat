@@ -4,8 +4,6 @@
 
 #include <winsock2.h>
 
-const int PACKET_CLIENT_ID = 0xFFDAC;
-
 struct Packet
 {   
     int type;
