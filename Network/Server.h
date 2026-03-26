@@ -7,6 +7,7 @@
 #include <string>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 
 #include <winsock2.h>
 
@@ -16,27 +17,32 @@
 struct ClientPacket
 {
     int client_index;
-    std::string buffer;
+    Packet packet;
 };
 
 class Server;
 void ServerThread(Server &);
-void SendThread(Server &);
+void ProcessThread(Server &);
 void ClientHandler(Server &, int);
+void SendThread(Server &);
 
 class Server
 {
 private:
     int max_clients;
     int max_data_size;
-    
-    friend void ServerThread(Server &);
-    friend void ProcessPackets(Server &);
-    friend void ClientHandler(Server &, int);
 
     std::thread server_thread;
     std::thread send_thread;
+    std::thread process_thread;
     std::vector<std::thread> client_therads;
+
+    std::function<void(const Packet&)> packet_handler;
+    
+    friend void ServerThread(Server &);
+    friend void ProcessThread(Server &);
+    friend void SendThread(Server&);
+    friend void ClientHandler(Server &, int);
 
 public:
     std::atomic<bool> running;
@@ -61,6 +67,7 @@ public:
         clients_connected = 0;
         client_socket.resize(max_clients);
         client_connected.resize(max_clients, false);
+        client_therads.resize(max_clients);
         this->max_clients = max_clients;
         this->max_data_size = max_data_size;
     }
@@ -91,19 +98,24 @@ public:
 
         server_thread = std::thread(ServerThread, std::ref(*this));
         send_thread = std::thread(SendThread, std::ref(*this));
+        process_thread = std::thread(ProcessThread, std::ref(*this));
 
         return true;
     }
 
-    void SendPacket(const ClientPacket &packet)
+    void SendClientPacket(const Packet &packet, int client_index)
     {
+        ClientPacket client_packet;
+        client_packet.client_index = client_index;
+        client_packet.packet = packet;
+
         std::lock_guard<std::mutex> lock(send_mutex);
-        send_queue.push(packet);
+        send_queue.push(client_packet);
 
         send_cv.notify_one();
     }
 
-    void BroadCast(const std::string &buffer)
+    void BroadCast(const Packet &packet)
     {
         std::lock_guard<std::mutex> lock(send_mutex);
 
@@ -111,11 +123,11 @@ public:
         {
             if(client_connected[client_index])
             {
-                ClientPacket packet;
-                packet.client_index = client_index;
-                packet.buffer = buffer;
+                ClientPacket client_packet;
+                client_packet.client_index = client_index;
+                client_packet.packet = packet;
 
-                send_queue.push(packet);
+                send_queue.push(client_packet);
             }
         }
 
@@ -137,11 +149,20 @@ public:
             client_connected[client_index] = false;
             client_socket[client_index] = INVALID_SOCKET;
             clients_connected--;
-
         }
 
-        closesocket(socket);
+        if(socket != INVALID_SOCKET)
+        {
+            shutdown(socket, SD_BOTH);
+            closesocket(socket);
+        }
+
         DebugLog("Client " + std::to_string(client_index) + " disconnected");
+    }
+
+    void SetPacketHandler(std::function<void (const Packet&)> handler)
+    {
+        packet_handler = handler;
     }
 
     void Close()
@@ -161,6 +182,9 @@ public:
         if(send_thread.joinable())
             send_thread.join();
 
+        if(process_thread.joinable())
+            process_thread.join();
+
         for(int client_index = 0; client_index < max_clients; client_index++)
             if(client_connected[client_index])
             {
@@ -176,10 +200,50 @@ public:
     }
 };
 
+void SendThread(Server &server)
+{
+    std::unique_lock<std::mutex> lock(server.send_mutex);
+
+    while(server.running)
+    {
+        server.send_cv.wait(lock, [&server] {
+            return !server.send_queue.empty() || !server.running;
+        });
+
+        while(!server.send_queue.empty())
+        {
+            ClientPacket client_packet = server.send_queue.front();
+            server.send_queue.pop();
+
+            lock.unlock();
+
+            SOCKET socket;
+
+            {
+                std::lock_guard<std::mutex> lock1(server.mutex);
+                socket = server.client_socket[client_packet.client_index];
+            }
+
+            if(socket != INVALID_SOCKET)
+            {
+                int packet_size = client_packet.packet.data.size();
+
+                SendData(socket, &packet_size, sizeof(int));
+                SendData(socket, &client_packet.packet.type, sizeof(int));
+                SendData(socket, client_packet.packet.data.data(), packet_size);
+            }
+
+            lock.lock();
+        }
+    }
+}
+
 void ClientHandler(Server &server, int client_index)
 {
-    ClientPacket packet = {};
-    packet.client_index = client_index;
+    ClientPacket client_packet = {};
+    Packet packet = {};
+
+    client_packet.client_index = client_index;
 
     while (true)
     {
@@ -195,11 +259,11 @@ void ClientHandler(Server &server, int client_index)
             std::lock_guard<std::mutex> lock(server.mutex);
             client_socket = server.client_socket[client_index];
         }
-
+        
         int packet_size = 0;
         if(!ReceiveData(client_socket, &packet_size, sizeof(int)))
         {
-            DebugLog("Client " + std::to_string(packet.client_index) + " had a header fail");
+            DebugLog("Client " + std::to_string(client_index) + " had a size fail");
             server.DisconnectClient(client_index);
             break;            
         }
@@ -211,53 +275,57 @@ void ClientHandler(Server &server, int client_index)
             break;
         }
 
-        DebugLog("Client " + std::to_string(client_index) + " packet size " + std::to_string(packet_size));
-
-        packet.buffer.clear();
-        packet.buffer.resize(packet_size);
-
-        if(!ReceiveData(client_socket, packet.buffer.data(), packet_size))
+        int packet_type = -1;
+        if(!ReceiveData(client_socket, &packet_type, sizeof(int)))
         {
-            DebugLog("Client " + std::to_string(packet.client_index) + " had a payload fail");
+            DebugLog("Server has disconected (packet type fail)");
             server.DisconnectClient(client_index);
             break;            
         }
 
+        DebugLog("Client " + std::to_string(client_index) + " packet size " + std::to_string(packet_size));
+
+        packet.data.clear();
+        packet.data.resize(packet_size);
+        packet.type = packet_type;
+
+        if(!ReceiveData(client_socket, packet.data.data(), packet_size))
+        {
+            DebugLog("Client " + std::to_string(client_index) + " had a payload fail");
+            server.DisconnectClient(client_index);
+            break;            
+        }
+
+        client_packet.packet = packet;
+
         {
             std::lock_guard<std::mutex> lock1(server.recv_mutex);
-            server.recv_queue.push(packet);
+            server.recv_queue.push(client_packet);
         } 
 
        server.recv_cv.notify_one();
     }
 }
 
-void SendThread(Server &server)
+void ProcessThread(Server &server)
 {
-    std::unique_lock<std::mutex> lock(server.send_mutex);
-
-    while(server.running)
+    while (server.running)
     {
-        server.send_cv.wait(lock, [&server] {
-            return !server.send_queue.empty() || !server.running;
+        std::unique_lock<std::mutex> lock(server.recv_mutex);
+
+        server.recv_cv.wait(lock, [&server] {
+            return !server.recv_queue.empty() || !server.running;
         });
 
-        while(!server.send_queue.empty())
+        while (!server.recv_queue.empty())
         {
-            ClientPacket packet = server.send_queue.front();
-            server.send_queue.pop();
+            ClientPacket client_packet = server.recv_queue.front();
+            server.recv_queue.pop();
 
             lock.unlock();
 
-            SOCKET socket;
-
-            {
-                std::lock_guard<std::mutex> lock1(server.mutex);
-                socket = server.client_socket[packet.client_index];
-            }
-
-            if(socket != INVALID_SOCKET)
-                SendData(socket, packet.buffer.data(), packet.buffer.size());
+            if(server.packet_handler)
+                server.packet_handler(client_packet.packet);
 
             lock.lock();
         }
@@ -285,6 +353,9 @@ void ServerThread(Server &server)
                     if(server.client_connected[i]) continue;
 
                     client_index = i;
+
+                    if(server.client_therads[i].joinable())
+                        server.client_therads[i].join();
 
                     server.client_socket[i] = new_client;
                     server.client_connected[i] = true;

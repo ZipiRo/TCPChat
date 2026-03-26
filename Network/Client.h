@@ -6,6 +6,7 @@
 #include <string>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -16,38 +17,50 @@
 class Client;
 void ReceiveThread(Client &client);
 void SendThread(Client &client);
+void ProcessThread(Client &client);
 
 class Client
 {
 private:
-    int ID;
+    std::string server_ip;
+    int server_port;
     int max_data_size;
 
+    std::thread receive_thread;
+    std::thread send_thread;
+    std::thread process_thread;
+
+    std::function<void(const Packet &packet)> packet_handler;
+
     friend void ReceiveThread(Client &client);
-    friend void ProcessPackets(Client &client);
+    friend void ProcessThread(Client &client);
+    friend void SendThread(Client &client);
 
 public:
     std::atomic<bool> connected;
 
     SOCKET network_socket;
+    std::mutex mutex;
 
-    std::queue<std::string> recv_queue;
+    std::queue<Packet> recv_queue;
     std::mutex recv_mutex;
     std::condition_variable recv_cv;
 
-    std::queue<std::string> send_queue;
+    std::queue<Packet> send_queue;
     std::mutex send_mutex;
     std::condition_variable send_cv;
 
     Client(int max_data_size) 
     {
-        ID = 0;
         connected = false;
         this->max_data_size = max_data_size;
     }
 
     bool Connect(const char* server_ip, int server_port)
     {   
+        this->server_ip = server_ip;
+        this->server_port = server_port;
+
         WSADATA wsdata;
         WSAStartup(MAKEWORD(2, 2), &wsdata);
 
@@ -67,36 +80,46 @@ public:
             return false;
         }
 
+        receive_thread = std::thread(ReceiveThread, std::ref(*this));
+        send_thread = std::thread(SendThread, std::ref(*this));
+        process_thread = std::thread(ProcessThread, std::ref(*this));
+
         connected = true;
-        std::thread(ReceiveThread, std::ref(*this)).detach();
-        std::thread(SendThread, std::ref(*this)).detach();
 
         return true;
     }
 
-    void Disconnect()
+    void SetPacketHandler(std::function<void(const Packet &packet)> handler)
     {
-        connected = false; 
-        send_cv.notify_all();
-        recv_cv.notify_all();
+        packet_handler = handler;
     }
 
-    void SendData(const std::string &data)
+    void SendPacket(const Packet &packet)
     {
         std::lock_guard<std::mutex> lock(send_mutex);
-        send_queue.push(data);
+        send_queue.push(packet);
         send_cv.notify_one();
     }
 
-    int GetID() { return ID; }
-
-    void Close()
+    void Disconnect()
     {
+        std::lock_guard<std::mutex> lock(mutex);
         connected = false;
         send_cv.notify_all();
         recv_cv.notify_all();
+
         shutdown(network_socket, SD_BOTH);
         closesocket(network_socket);
+
+        if(receive_thread.joinable())
+            receive_thread.join();
+
+        if(send_thread.joinable())
+            send_thread.join();
+
+        if(process_thread.joinable())
+            process_thread.join();
+
         WSACleanup();
     }
 };
@@ -113,15 +136,20 @@ void SendThread(Client &client)
 
         while(!client.send_queue.empty())
         {
-            std::string buffer = client.send_queue.front();
+            Packet packet = client.send_queue.front();
             client.send_queue.pop();
             
             lock.unlock();
 
             if(client.connected && client.network_socket != INVALID_SOCKET)
             {
-                DebugLog("Sending data to server, data size: " + std::to_string(buffer.size()));
-                SendData(client.network_socket, buffer.data(), buffer.size());
+                DebugLog("Sending data to server, data size: " + std::to_string(packet.data.size()));
+
+                int packet_size = packet.data.size();
+
+                SendData(client.network_socket, &packet_size, sizeof(int));
+                SendData(client.network_socket, &packet.type, sizeof(int));
+                SendData(client.network_socket, packet.data.data(), packet_size);
             }
 
             lock.lock();
@@ -131,7 +159,7 @@ void SendThread(Client &client)
 
 void ReceiveThread(Client &client)
 {
-    std::string buffer;
+    Packet packet = {};
     while (client.connected)
     {
         SOCKET &network_socket = client.network_socket;
@@ -139,7 +167,7 @@ void ReceiveThread(Client &client)
         int packet_size = 0;
         if(!ReceiveData(network_socket, &packet_size, sizeof(int)))
         {
-            DebugLog("Server has disconected (header fail)");
+            DebugLog("Server has disconected (packet size fail)");
             client.Disconnect();
             break;            
         }
@@ -151,10 +179,19 @@ void ReceiveThread(Client &client)
             break;
         }
 
-        buffer.clear();
-        buffer.resize(packet_size);
+        int packet_type = -1;
+        if(!ReceiveData(network_socket, &packet_type, sizeof(int)))
+        {
+            DebugLog("Server has disconected (packet type fail)");
+            client.Disconnect();
+            break;            
+        }
 
-        if(!ReceiveData(network_socket, buffer.data(), packet_size))
+        packet.data.clear();
+        packet.data.resize(packet_size);
+        packet.type = packet_type;
+
+        if(!ReceiveData(network_socket, packet.data.data(), packet_size))
         {
             DebugLog("Server has disconected (payload fail)");
             client.Disconnect();
@@ -163,9 +200,34 @@ void ReceiveThread(Client &client)
 
         {
             std::lock_guard<std::mutex> lock(client.recv_mutex);
-            client.recv_queue.push(buffer);
+            client.recv_queue.push(packet);
         } 
 
        client.recv_cv.notify_one();
     }
 }
+
+void ProcessThread(Client &client)
+{
+    while (client.connected)
+    {
+        std::unique_lock<std::mutex> lock(client.recv_mutex);
+
+        client.recv_cv.wait(lock, [&client] {
+            return !client.recv_queue.empty() || !client.connected;
+        });
+
+        while (!client.recv_queue.empty())
+        {
+            Packet packet = client.recv_queue.front();
+            client.recv_queue.pop();
+
+            lock.unlock();
+
+            if(client.packet_handler)
+                client.packet_handler(packet);
+
+            lock.lock();
+        }
+    }
+}   

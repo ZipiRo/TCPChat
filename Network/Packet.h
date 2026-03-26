@@ -4,20 +4,51 @@
 
 #include <winsock2.h>
 
+const int PACKET_CLIENT_ID = 0xFFDAC;
+
+struct Packet
+{   
+    int type;
+    std::string data;
+
+    template <typename T>
+    void Write(const T& data)
+    {
+        this->data.append((const char*)&data, sizeof(T));
+    }
+};
+
+class PacketReader
+{
+private:
+    std::string data;
+    int offset;
+
+public:
+    PacketReader(const std::string &data) 
+    {
+        this->data = data;
+        offset = 0;
+    }
+
+    template <typename T>
+    T Read()
+    {
+        T value;
+        memcpy(&value, data.data() + offset, sizeof(T));
+        offset += sizeof(T);
+        return value;
+    }
+
+    void Reset()
+    {
+        offset = 0;
+    }
+};
+
 bool SendData(const SOCKET &socket, const void* data, int size)
 {
     const char* buffer = (const char*)data;
-    
-    int header_sent = 0;
-    while(header_sent < sizeof(int))
-    {
-        int sent = send(socket, (char*)&size + header_sent, sizeof(int) - header_sent, 0);
-        
-        if(sent == SOCKET_ERROR) 
-            return false;
-        
-        header_sent += sent;
-    }
 
     int total_sent = 0;
     while (total_sent < size)

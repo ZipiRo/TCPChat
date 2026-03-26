@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fstream>
 #include <thread>
 #include <queue>
 #include <mutex>
@@ -8,36 +9,59 @@
 #include <iostream>
 #include <atomic>
 
+enum WriteType
+{
+    LOGGER_WRITE_NONE,
+    LOGGER_WRITE_CONSOLE,
+    LOGGER_WRITE_FILE
+};
+
 class Logger
 {
 private:
+    std::ofstream log_file_output;
+    WriteType write_type;
+    std::string log_file_path;
+
     std::thread debug_thread;
     std::queue<std::string> debug_queue;
 
     std::mutex debug_mutex;
     std::condition_variable debug_cv;
 
-    std::atomic<bool> debug_running;
+    std::atomic<bool> logger_running;
 
     Logger() 
     {
-        debug_running = true;
+        logger_running = true;
+        write_type = LOGGER_WRITE_NONE;
         debug_thread = std::thread(&Logger::DebugThread, this);
     }
 
     ~Logger()
     {
-        CloseLogger();
+        logger_running = false;
+        debug_cv.notify_all();
+        log_file_output.close();
+
+        if (debug_thread.joinable())
+            debug_thread.join();
     }
 
     void DebugThread()
     {
         std::unique_lock<std::mutex> lock(debug_mutex);
 
-        while(debug_running)
+        while(logger_running)
         {
+            if(write_type == LOGGER_WRITE_FILE && log_file_path.empty()) continue;
+            else 
+            {
+                log_file_output.open(log_file_path, std::ios_base::app);
+            }
+
             debug_cv.wait(lock, [this] {
-                return !debug_queue.empty() || !debug_running;
+                return !debug_queue.empty() || !logger_running;
             });
 
             while(!debug_queue.empty())
@@ -45,9 +69,23 @@ private:
                 std::string log = std::move(debug_queue.front());
                 debug_queue.pop();
 
-                lock.unlock();
+                lock.unlock(); 
 
-                std::cout << "> " << log << '\n';
+                switch (write_type)
+                {
+                case LOGGER_WRITE_NONE:
+                    break;
+                case LOGGER_WRITE_CONSOLE:
+                    std::cout << "> " << log << '\n';
+                    break;
+                case LOGGER_WRITE_FILE:
+                {
+                    log_file_output << "> " << log << '\n';
+                    break;
+                }
+                default:
+                    break;
+                }
 
                 lock.lock();
             }
@@ -69,14 +107,20 @@ public:
         return instance;
     }
 
-    static void CloseLogger()
+    static void SetWriteType(WriteType type)
     {
         Logger &logger = Logger::GetInstance();
-        
-        logger.debug_running = false;
-        logger.debug_cv.notify_all();
-        if (logger.debug_thread.joinable())
-            logger.debug_thread.join();
+     
+        std::unique_lock<std::mutex> lock(logger.debug_mutex);
+        logger.write_type = type;
+    }
+
+    static void SetLogFilePath(const std::string &path)
+    {
+        Logger &logger = Logger::GetInstance();
+     
+        std::unique_lock<std::mutex> lock(logger.debug_mutex);
+        logger.log_file_path = path;
     }
 
     Logger(const Logger&) = delete;
