@@ -4,16 +4,46 @@
 
 #include <winsock2.h>
 
-struct Packet
-{   
-    int type;
+class Packet
+{
+private:
     std::string data;
 
-    template <typename T>
-    void Write(const T& data)
+public:
+    Packet() 
     {
-        this->data.append((const char*)&data, sizeof(T));
+        data.resize(sizeof(int));
     }
+
+    Packet(int packet_type)
+{
+        data.resize(sizeof(int));
+        memcpy(data.data(), &packet_type, sizeof(int));
+    }
+
+    template <typename T>
+    void Write(const T& value)
+    {
+        int old_data_size = data.size();
+
+        data.resize(old_data_size + sizeof(T));
+        memcpy(data.data() + old_data_size, &value, sizeof(T));
+    }
+
+    void SetPacketType(int packet_type)
+    {
+        memcpy(data.data(), &packet_type, sizeof(int));
+    }
+
+    std::string &StringData() 
+    {
+        return data;
+    }
+
+    int Size()
+    {
+        return data.size();
+    } 
 };
 
 class PacketReader
@@ -23,9 +53,9 @@ private:
     int offset;
 
 public:
-    PacketReader(const std::string &data) 
+    PacketReader(Packet &packet) 
     {
-        this->data = data;
+        data = packet.StringData();
         offset = 0;
     }
 

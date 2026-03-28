@@ -30,7 +30,7 @@ private:
     std::thread send_thread;
     std::thread process_thread;
 
-    std::function<void(const Packet &packet)> packet_handler;
+    std::function<void(Packet &packet)> packet_handler;
 
     friend void ReceiveThread(Client &client);
     friend void ProcessThread(Client &client);
@@ -80,8 +80,8 @@ public:
             return false;
         }
 
-        receive_thread = std::thread(ReceiveThread, std::ref(*this));
         send_thread = std::thread(SendThread, std::ref(*this));
+        receive_thread = std::thread(ReceiveThread, std::ref(*this));
         process_thread = std::thread(ProcessThread, std::ref(*this));
 
         connected = true;
@@ -89,7 +89,7 @@ public:
         return true;
     }
 
-    void SetPacketHandler(std::function<void(const Packet &packet)> handler)
+    void SetPacketHandler(std::function<void(Packet &packet)> handler)
     {
         packet_handler = handler;
     }
@@ -143,13 +143,11 @@ void SendThread(Client &client)
 
             if(client.connected && client.network_socket != INVALID_SOCKET)
             {
-                DebugLog("Sending data to server, data size: " + std::to_string(packet.data.size()));
-
-                int packet_size = packet.data.size();
-
+                int packet_size = packet.Size();
                 SendData(client.network_socket, &packet_size, sizeof(int));
-                SendData(client.network_socket, &packet.type, sizeof(int));
-                SendData(client.network_socket, packet.data.data(), packet_size);
+                SendData(client.network_socket, packet.StringData().data(), packet_size);
+
+                DebugLog("Sending a packet to server with size of " + std::to_string(packet_size));
             }
 
             lock.lock();
@@ -159,44 +157,36 @@ void SendThread(Client &client)
 
 void ReceiveThread(Client &client)
 {
-    Packet packet = {};
     while (client.connected)
     {
         SOCKET &network_socket = client.network_socket;
 
         int packet_size = 0;
-        if(!ReceiveData(network_socket, &packet_size, sizeof(int)))
+        if(!ReceiveData(client.network_socket, &packet_size, sizeof(int)))
         {
-            DebugLog("Server has disconected (packet size fail)");
+            DebugLog("Server had some socket errors, disconnecting...");
             client.Disconnect();
             break;            
         }
 
         if(packet_size <= 0 || packet_size > client.max_data_size)
         {
-            DebugLog("Invalid packet size from server");
+            DebugLog("Invalid packet size from server " + std::to_string(packet_size));
             client.Disconnect();
             break;
         }
 
-        int packet_type = -1;
-        if(!ReceiveData(network_socket, &packet_type, sizeof(int)))
+        Packet packet;
+        packet.StringData().resize(packet_size);
+
+        if(!ReceiveData(network_socket, packet.StringData().data(), packet_size))
         {
-            DebugLog("Server has disconected (packet type fail)");
+            DebugLog("Server had some socket errors, disconnecting...");
             client.Disconnect();
             break;            
         }
 
-        packet.data.clear();
-        packet.data.resize(packet_size);
-        packet.type = packet_type;
-
-        if(!ReceiveData(network_socket, packet.data.data(), packet_size))
-        {
-            DebugLog("Server has disconected (payload fail)");
-            client.Disconnect();
-            break;            
-        }
+        DebugLog("Server sent a packet with size of " + std::to_string(packet_size));
 
         {
             std::lock_guard<std::mutex> lock(client.recv_mutex);

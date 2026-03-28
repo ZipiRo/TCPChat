@@ -19,9 +19,11 @@ void ProcessClientPacket(const ClientPacket &client_packet)
     int client_index = client_packet.client_index;
     Packet packet = client_packet.packet;
 
-    PacketReader reader(packet.data);
+    PacketReader reader(packet);
     
-    switch (packet.type)
+    int type = reader.Read<int>();
+
+    switch (PacketType(type))
     {
     case PACKET_JOIN:
     {
@@ -36,8 +38,9 @@ void ProcessClientPacket(const ClientPacket &client_packet)
         {
             DebugLog("Client is valid");
 
-            Packet packet;
-            packet.type = PACKET_WELLCOME;
+            Packet packet(PACKET_WELLCOME);
+            packet.Write(client_index);
+
             server.SendClientPacket(packet, client_index);
         }
 

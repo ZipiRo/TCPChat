@@ -4,15 +4,19 @@
 #include <Client.h>
 #include <ServerSettings.h>
 
-void ProcessPacket(const Packet &packet)
+void ProcessPacket(Packet &packet)
 {
-    switch (packet.type)
+    PacketReader reader(packet);
+    
+    int type = reader.Read<int>();
+
+    switch (PacketType(type))
     {
     case PACKET_WELLCOME:
     {
-        PacketReader reader(packet.data);
+        int id = reader.Read<int>();
 
-        std::cout << "CONNECTION SUCCESFULL!";
+        std::cout << "You are player " << id << '\n';
 
         break;
     }
@@ -31,8 +35,7 @@ int main()
 
     if(client.connected)
     {
-        Packet packet;
-        packet.type = PACKET_JOIN;
+        Packet packet(PACKET_JOIN);
         packet.Write(PROTOCOL_VERSION);
         packet.Write(MAGIC_HANDSHAKE);
 
